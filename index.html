@@ -82,6 +82,19 @@
   }
   select:focus, input:focus{ outline: 2px solid var(--brass-light); outline-offset:1px; }
 
+  .track-badge{
+    width:100%; font-family:'Inter',sans-serif; font-size:14.5px; font-weight:600; color: var(--ink);
+    background: var(--paper-2); border:1px dashed var(--line); border-radius:6px; padding:10px 12px;
+    display:flex; align-items:center; gap:8px;
+  }
+  .track-badge::before{ content:"🔒"; font-size:12px; opacity:.7; }
+  .track-badge.set{ background:#fff; border-style:solid; border-color: var(--brass-light); color: var(--navy); }
+  .track-badge.warn{ background: var(--red-bg); border-style:solid; border-color: var(--red); color: var(--red); }
+
+  .empty-state.warn{
+    color: #fff; background: rgba(156,58,58,0.25); border-color: rgba(156,58,58,0.55);
+  }
+
   .progress-line{
     margin-top:16px; padding-top:14px; border-top: 1px dashed var(--line);
     display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
@@ -196,7 +209,7 @@
     <div>
       <p class="brand-eyebrow">Bermuda Journal of Academic Research</p>
       <h1>Judge Scoring — Inaugural Conference</h1>
-      <p class="subhead">Score each presentation once. Pick a track, tap a presenter, submit.</p>
+      <p class="subhead">Enter your name, then tap a presenter in your assigned track and submit.</p>
     </div>
   </header>
 
@@ -208,10 +221,8 @@
         <datalist id="judgeOptions"></datalist>
       </div>
       <div>
-        <label class="field-label" for="trackSelect">Track</label>
-        <select id="trackSelect">
-          <option value="">Select a track…</option>
-        </select>
+        <label class="field-label">Your track</label>
+        <div class="track-badge" id="trackBadge">Enter your name to see your track</div>
       </div>
     </div>
     <div class="progress-line" id="progressLine" style="display:none;">
@@ -221,7 +232,7 @@
   </div>
 
   <div id="cardArea">
-    <div class="empty-state">Pick your name and a track to see that track's presenters.</div>
+    <div class="empty-state">Enter your name above to see your track's presenters.</div>
   </div>
 
   <p class="footer-note">Scores save straight to the conference scoring sheet — no need to hand anything in.</p>
@@ -259,9 +270,12 @@
    Empty string = preview mode (works with sample data, no writes persist).
    ============================================================ */
 const CONFIG = {
-  scriptUrl: "https://script.google.com/macros/s/AKfycbzlP92re5MN9UNLYqTnNcw8OEMCsbeKwVl8uXEb7s0z6IlQJogu_zl9OAIN0t_nmXgM/exec", // <-- paste your deployment /exec URL here
-  tracks: ["Economics & Business", "Social Sciences", "Natural & Health Sciences"],
-  previewJudges: ["Jane Judge", "Marcus Trott", "Aliyah Simmons"],
+  scriptUrl: "", // <-- paste your deployment /exec URL here
+  previewJudges: [
+    { name: "Jane Judge", track: "Economics & Business" },
+    { name: "Marcus Trott", track: "Health & Social Sciences" },
+    { name: "Aliyah Simmons", track: "Environmental & Natural Sciences" },
+  ],
   previewPresenters: [
     { id: "P001", name: "Jane Doe", track: "Economics & Business", category: "Aspiring Researcher",
       title: "Small Island, Big Exposure: FDI Concentration and Fiscal Risk" },
@@ -283,6 +297,7 @@ const RUBRIC = [
 
 let currentJudge = "";
 let currentTrack = "";
+let judgesList = [];  // [{name, track}] — loaded once, used to derive track from the typed name
 let presenters = [];
 let myScores = {};   // presenterId -> {style,gap,method,clarity,time,total,comments}
 let activePresenter = null;
@@ -313,7 +328,10 @@ function previewGet(params) {
   return new Promise(res => setTimeout(() => {
     if (params.list === 'judges') return res(CONFIG.previewJudges);
     if (params.list === 'presenters') {
-      return res(CONFIG.previewPresenters.filter(p => !params.track || p.track === params.track));
+      const j = CONFIG.previewJudges.find(x => x.name.toLowerCase() === (params.judge || '').toLowerCase());
+      if (!j) return res({ ok: false, message: `We don't recognize "${params.judge}" on the Judges tab. Ask the conference organiser to add you with your assigned track.` });
+      if (!j.track) return res({ ok: false, message: "You're listed as a judge, but no track has been assigned to you yet." });
+      return res({ ok: true, track: j.track, presenters: CONFIG.previewPresenters.filter(p => p.track === j.track) });
     }
     if (params.list === 'myscores') return res(myScores);
     res({});
@@ -321,49 +339,66 @@ function previewGet(params) {
 }
 
 /* ---------- init ---------- */
-function initTracks() {
-  const sel = document.getElementById('trackSelect');
-  CONFIG.tracks.forEach(t => {
-    const o = document.createElement('option');
-    o.value = t; o.textContent = t;
-    sel.appendChild(o);
-  });
-}
 function initJudges() {
   apiGet({ list: 'judges' }).then(list => {
+    judgesList = Array.isArray(list) ? list : [];
     const dl = document.getElementById('judgeOptions');
     dl.innerHTML = '';
-    (Array.isArray(list) ? list : []).forEach(name => {
+    judgesList.forEach(j => {
       const o = document.createElement('option');
-      o.value = name;
+      o.value = j.name;
       dl.appendChild(o);
     });
   }).catch(() => {});
 }
 
+function setTrackBadge(text, state) {
+  const el = document.getElementById('trackBadge');
+  el.textContent = text;
+  el.className = 'track-badge' + (state ? ' ' + state : '');
+}
+
 document.getElementById('judgeInput').addEventListener('change', e => {
   currentJudge = e.target.value.trim();
-  refreshList();
-});
-document.getElementById('trackSelect').addEventListener('change', e => {
-  currentTrack = e.target.value;
+  currentTrack = '';
+  if (!currentJudge) {
+    setTrackBadge('Enter your name to see your track', '');
+    refreshList();
+    return;
+  }
+  // Look up the track locally first for instant feedback; the server re-derives
+  // and enforces it independently on every request, so this is display-only.
+  const match = judgesList.find(j => j.name.toLowerCase() === currentJudge.toLowerCase());
+  if (!match) {
+    setTrackBadge('Not recognized — ask the organiser to add you', 'warn');
+  } else if (!match.track) {
+    setTrackBadge('No track assigned yet — ask the organiser', 'warn');
+  } else {
+    setTrackBadge(match.track, 'set');
+  }
   refreshList();
 });
 
 function refreshList() {
   const area = document.getElementById('cardArea');
   const progressLine = document.getElementById('progressLine');
-  if (!currentJudge || !currentTrack) {
-    area.innerHTML = '<div class="empty-state">Pick your name and a track to see that track\'s presenters.</div>';
+  if (!currentJudge) {
+    area.innerHTML = '<div class="empty-state">Enter your name above to see your track\'s presenters.</div>';
     progressLine.style.display = 'none';
     return;
   }
   area.innerHTML = '<div class="empty-state">Loading presenters…</div>';
   Promise.all([
-    apiGet({ list: 'presenters', track: currentTrack }),
+    apiGet({ list: 'presenters', judge: currentJudge }),
     apiGet({ list: 'myscores', judge: currentJudge })
-  ]).then(([pList, scores]) => {
-    presenters = Array.isArray(pList) ? pList : [];
+  ]).then(([pRes, scores]) => {
+    if (pRes && pRes.ok === false) {
+      area.innerHTML = `<div class="empty-state warn">${escapeHtml(pRes.message || "Couldn't load your track.")}</div>`;
+      progressLine.style.display = 'none';
+      return;
+    }
+    currentTrack = pRes.track || '';
+    presenters = Array.isArray(pRes.presenters) ? pRes.presenters : [];
     myScores = (scores && typeof scores === 'object') ? scores : {};
     renderCards();
   }).catch(() => {
@@ -417,7 +452,7 @@ const rubricArea = document.getElementById('rubricArea');
 
 function openPanel(presenter) {
   activePresenter = presenter;
-  document.getElementById('panelCat').textContent = `${presenter.category} · ${presenter.track}`;
+  document.getElementById('panelCat').textContent = `${presenter.category} · ${currentTrack}`;
   document.getElementById('panelName').textContent = presenter.name;
   document.getElementById('panelTitle').textContent = presenter.title || '';
   document.getElementById('panelMsg').textContent = '';
@@ -483,8 +518,6 @@ document.getElementById('submitBtn').addEventListener('click', () => {
   const payload = {
     judgeName: currentJudge,
     presenterId: activePresenter.id,
-    track: activePresenter.track,
-    category: activePresenter.category,
     scores: currentScores(),
     comments: document.getElementById('commentsInput').value.trim(),
   };
@@ -500,7 +533,7 @@ document.getElementById('submitBtn').addEventListener('click', () => {
     msg.textContent = 'Saved.';
     msg.className = 'panel-msg ok';
     renderCards();
-    showToast(`Saved — ${activePresenter.name}: ${res.total} / 50`);
+    showToast(`Saved — ${res.presenterName || activePresenter.name}: ${res.total} / 50`);
     setTimeout(closePanel, 550);
   }).catch(() => {
     btn.disabled = false;
@@ -516,7 +549,6 @@ function showToast(text) {
   setTimeout(() => t.classList.remove('show'), 2400);
 }
 
-initTracks();
 initJudges();
 </script>
 </body>
